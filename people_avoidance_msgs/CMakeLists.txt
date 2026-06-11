@@ -26,6 +26,7 @@ endif()
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LegMeasurementMsg.msg"
+  "msg/LegMeasurementArray.msg"
 )
 
 ament_package()

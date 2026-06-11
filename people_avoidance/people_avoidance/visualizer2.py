@@ -3,7 +3,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from people_avoidance_msgs.msg import LegMeasurementMsg
+from people_avoidance_msgs.msg import LegMeasurementMsg, LegMeasurementArray
 
 # TF2 Imports
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -30,7 +30,7 @@ class LidarVisualizer(Node):
         
         # Leg Subscription
         self.leg_sub = self.create_subscription(
-            LegMeasurementMsg,
+            LegMeasurementArray,
             '/legs',
             self.leg_callback,
             10)
@@ -87,8 +87,14 @@ class LidarVisualizer(Node):
     def leg_callback(self, msg):
         # Store legs (they are already published in odom frame by the detector node)
         # Append to arrays to show multiple legs if necessary
-        self.lx = np.array([msg.x])
-        self.ly = np.array([msg.y])
+        # Extract all x and y coordinates from the list of leg objects
+        if len(msg.legs) > 0:
+            self.lx = np.array([leg.x for leg in msg.legs], dtype=np.float64)
+            self.ly = np.array([leg.y for leg in msg.legs], dtype=np.float64)
+        else:
+            # Clear the arrays if no legs are detected
+            self.lx = np.array([], dtype=np.float64)
+            self.ly = np.array([], dtype=np.float64)
 
     def _yaw_from_quaternion(self, x, y, z, w):
         siny_cosp = 2.0 * (w * z + x * y)

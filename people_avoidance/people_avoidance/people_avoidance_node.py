@@ -25,7 +25,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, PointStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from people_avoidance_msgs.msg import LegMeasurementMsg
+from people_avoidance_msgs.msg import LegMeasurementMsg, LegMeasurementArray
 
 # TF2 Imports
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -89,7 +89,7 @@ class PeopleAvoidanceNode(Node):
 
         # ── Publisher ─────────────────────────────────────────────────────────
         self._cmd_pub = self.create_publisher(Twist, p["cmd_vel_topic"], 10)
-        self._leg_pub = self.create_publisher(LegMeasurementMsg, "/legs", 10)
+        self._leg_pub = self.create_publisher(LegMeasurementArray, "/legs", 10)
 
         self.get_logger().info(
             f"PeopleAvoidanceNode ready — "
@@ -192,16 +192,17 @@ class PeopleAvoidanceNode(Node):
                 scan.header.stamp,
                 rclpy.duration.Duration(seconds=0.1) # Wait up to 100ms for TF
             )
-
+            msg = LegMeasurementArray()
             for m_laser in measurements_laser:
                 m_odom = self._transform_with_tf(m_laser, transform)
                 measurements_odom.append(m_odom)
                 
                 # Publish for visualization/debug
-                msg = LegMeasurementMsg()
-                msg.x, msg.y = m_odom.x, m_odom.y
-                msg.rxx, msg.rxy, msg.ryy = m_odom.Rxx, m_odom.Rxy, m_odom.Ryy
-                self._leg_pub.publish(msg)
+                leg = LegMeasurementMsg()
+                leg.x, leg.y = m_odom.x, m_odom.y
+                leg.rxx, leg.rxy, leg.ryy = m_odom.Rxx, m_odom.Rxy, m_odom.Ryy
+                msg.legs.append(leg)
+            self._leg_pub.publish(msg)
 
         except TransformException as ex:
             self.get_logger().warning(f"Could not transform laser to odom: {ex}")
