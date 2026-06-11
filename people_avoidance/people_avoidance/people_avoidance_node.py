@@ -25,7 +25,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, PointStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from people_avoidance_msgs.msg import LegMeasurementMsg, LegMeasurementArray
+from people_avoidance_msgs.msg import LegMeasurementMsg, LegMeasurementArray, TrackMsg, TrackArray
 
 # TF2 Imports
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -90,6 +90,7 @@ class PeopleAvoidanceNode(Node):
         # ── Publisher ─────────────────────────────────────────────────────────
         self._cmd_pub = self.create_publisher(Twist, p["cmd_vel_topic"], 10)
         self._leg_pub = self.create_publisher(LegMeasurementArray, "/legs", 10)
+        self._track_pub = self.create_publisher(TrackArray, "/tracks", 10)
 
         self.get_logger().info(
             f"PeopleAvoidanceNode ready — "
@@ -211,6 +212,17 @@ class PeopleAvoidanceNode(Node):
         # ── Stage 2: Kalman tracking (all tracks are in odom frame) ───────────
         self.tracker.update(measurements_odom)
         tracks = self.tracker.get_tracks()
+        
+        msg = TrackArray()
+        for track in tracks:
+            trk = TrackMsg()
+            trk.x = track.m[0]
+            trk.y = track.m[1]
+            trk.vx = track.m[2]
+            trk.vy = track.m[3]
+            trk.id = track.track_id
+            msg.tracks.append(trk)
+        self._track_pub.publish(msg)
 
         # ── Stage 3: avoidance control (controller expects odom‑frame tracks) ─
         cmd = compute_velocity(
