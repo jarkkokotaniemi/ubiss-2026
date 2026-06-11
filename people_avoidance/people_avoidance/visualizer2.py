@@ -30,7 +30,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from sensor_msgs.msg import LaserScan
-from people_avoidance_msgs.msg import LegMeasurementArray
+from people_avoidance_msgs.msg import LegMeasurementArray, TrackArray
 
 from tf2_ros import Buffer, TransformListener, TransformException
 
@@ -53,10 +53,13 @@ GRID_RESOLUTION   = 0.05   # metres per cell
 GRID_HALF_EXTENT  = 10.0   # grid covers ±10 m around the origin in odom frame
 GRID_SIZE         = int(2 * GRID_HALF_EXTENT / GRID_RESOLUTION)  # cells per side
 
-OBSTACLE_INFLATE  = 0.18   # metres — inflate obstacles by robot half-width
+OBSTACLE_INFLATE  = 0.18   # metres — inflate scan obstacles by robot half-width
 INFLATE_CELLS     = max(1, int(OBSTACLE_INFLATE / GRID_RESOLUTION))
 
-PATH_REPLAN_HZ    = 1.0    # how often (seconds) to replan
+PERSON_INFLATE    = 0.50   # metres — much larger bubble around tracked people
+PERSON_INFLATE_CELLS = max(1, int(PERSON_INFLATE / GRID_RESOLUTION))
+
+PATH_REPLAN_HZ    = 4.0    # how often (seconds) to replan — fast enough to track moving people
 
 # ---------------------------------------------------------------------------
 # A* on a 2-D occupancy grid
@@ -179,8 +182,9 @@ class LidarVisualizer(Node):
         self.tf_buffer   = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.scan_sub = self.create_subscription(LaserScan,            "/scan", self.scan_callback, 10)
-        self.leg_sub  = self.create_subscription(LegMeasurementArray, "/legs", self.leg_callback,  10)
+        self.scan_sub  = self.create_subscription(LaserScan,             "/scan",   self.scan_callback,  10)
+        self.leg_sub   = self.create_subscription(LegMeasurementArray,  "/legs",   self.leg_callback,   10)
+        self.track_sub = self.create_subscription(TrackArray,            "/tracks", self.track_callback, 10)
 
         # Latest lidar points in odom frame
         self.scan_x: np.ndarray = np.array([])
@@ -189,6 +193,10 @@ class LidarVisualizer(Node):
         # Latest leg detections in odom frame
         self.leg_x: np.ndarray = np.array([])
         self.leg_y: np.ndarray = np.array([])
+
+        # Latest Kalman tracks: each entry is a dict with x,y,vx,vy,id,Pxx,Pxy,Pyy
+        self.tracks: list[dict] = []
+        self._track_lock = threading.Lock()
 
         # Robot pose in odom frame
         self.robot_x:   float = 0.0
@@ -266,9 +274,12 @@ class LidarVisualizer(Node):
             return
 
     def _rebuild_grid(self) -> None:
-        """Mark every scan point (and inflated neighbours) as occupied."""
+        """Mark every scan point (and inflated neighbours) as occupied.
+        Also stamp a large inflation bubble around each Kalman track so
+        A* plans a path that avoids detected people."""
         grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
 
+        # Raw scan obstacles (wall/furniture inflation)
         for wx, wy in zip(self.scan_x, self.scan_y):
             row, col = _world_to_cell(wx, wy)
             r0 = max(0, row - INFLATE_CELLS)
@@ -276,6 +287,21 @@ class LidarVisualizer(Node):
             c0 = max(0, col - INFLATE_CELLS)
             c1 = min(GRID_SIZE, col + INFLATE_CELLS + 1)
             grid[r0:r1, c0:c1] = True
+
+        # Tracked-people inflation — larger bubble so A* routes around them
+        with self._track_lock:
+            current_tracks = list(self.tracks)
+        for t in current_tracks:
+            row, col = _world_to_cell(t["x"], t["y"])
+            r0 = max(0, row - PERSON_INFLATE_CELLS)
+            r1 = min(GRID_SIZE, row + PERSON_INFLATE_CELLS + 1)
+            c0 = max(0, col - PERSON_INFLATE_CELLS)
+            c1 = min(GRID_SIZE, col + PERSON_INFLATE_CELLS + 1)
+            # Circular mask so corners aren't blocked unnecessarily
+            for r in range(r0, r1):
+                for c in range(c0, c1):
+                    if math.hypot(r - row, c - col) <= PERSON_INFLATE_CELLS:
+                        grid[r, c] = True
 
         with self._grid_lock:
             self._grid = grid
@@ -289,6 +315,23 @@ class LidarVisualizer(Node):
         else:
             self.leg_x = np.array([])
             self.leg_y = np.array([])
+
+    # ── Track callback ────────────────────────────────────────────────────────
+
+    def track_callback(self, msg: TrackArray) -> None:
+        """Cache the latest Kalman track list for visualization."""
+        tracks = []
+        for t in msg.tracks:
+            tracks.append({
+                "x": t.x, "y": t.y,
+                "vx": t.vx, "vy": t.vy,
+                "id": t.id,
+                # TrackMsg doesn't carry P; we'll draw a fixed-size ellipse
+                # sized to a typical 2-sigma position uncertainty (~0.25 m).
+                "sigma": 0.25,
+            })
+        with self._track_lock:
+            self.tracks = tracks
 
     # ── Planner thread ────────────────────────────────────────────────────────
 
@@ -405,8 +448,25 @@ class MainWindow(QMainWindow):
             pen=pg.mkPen(180, 220, 255, width=1),
         )
 
+        # Kalman track centre dots
+        self._track_scatter = pg.ScatterPlotItem(
+            size=12, symbol="o",
+            brush=pg.mkBrush(255, 153, 0, 200),
+            pen=pg.mkPen(255, 200, 80, 255, width=1.5),
+        )
+
+        # Velocity arrow lines (one PlotCurveItem per track, managed dynamically)
+        self._vel_items: list[pg.PlotCurveItem] = []
+
+        # Covariance ellipses (one PlotCurveItem per track, managed dynamically)
+        self._ellipse_items: list[pg.PlotCurveItem] = []
+
+        # Track ID text labels (one TextItem per track, managed dynamically)
+        self._id_labels: list[pg.TextItem] = []
+
         for item in (
             self._scan_scatter, self._leg_scatter,
+            self._track_scatter,
             self._path_line, self._waypoint_scatter,
             self._goal_scatter, self._robot_arrow,
         ):
@@ -416,6 +476,9 @@ class MainWindow(QMainWindow):
         legend_html = (
             '<span style="color:#3cc850">■</span> Scan &nbsp;'
             '<span style="color:#ff3c3c">●</span> Legs &nbsp;'
+            '<span style="color:#ff9900">●</span> Track pos &nbsp;'
+            '<span style="color:#ff9900">→</span> Velocity &nbsp;'
+            '<span style="color:#ff6600">○</span> 2σ ellipse &nbsp;'
             '<span style="color:#00dcff">– –</span> Path &nbsp;'
             '<span style="color:#ffdc00">✕</span> Goal'
         )
@@ -488,9 +551,75 @@ class MainWindow(QMainWindow):
             self._waypoint_scatter.setData([], [])
 
         # Robot arrow
+        # pg.ArrowItem: angle is CCW from the +X axis in *screen* space where
+        # Y points down, so we negate the ROS yaw (CCW from +X, Y up).
         deg = math.degrees(node.robot_yaw)
         self._robot_arrow.setPos(node.robot_x, node.robot_y)
-        self._robot_arrow.setStyle(angle=deg + 180)
+        self._robot_arrow.setStyle(angle=-deg)   # fix: was +180, now correct
+
+        # ── Kalman tracks ──────────────────────────────────────────────────────
+        with node._track_lock:
+            tracks = list(node.tracks)
+
+        # Grow or shrink dynamic item pools
+        while len(self._vel_items) < len(tracks):
+            item = pg.PlotCurveItem(pen=pg.mkPen(255, 180, 0, 200, width=2))
+            self.plot_widget.addItem(item)
+            self._vel_items.append(item)
+
+        while len(self._ellipse_items) < len(tracks):
+            item = pg.PlotCurveItem(pen=pg.mkPen(255, 100, 0, 160, width=1.5))
+            self.plot_widget.addItem(item)
+            self._ellipse_items.append(item)
+
+        while len(self._id_labels) < len(tracks):
+            lbl = pg.TextItem("", color=(255, 220, 100), anchor=(0.5, 1.2))
+            lbl.setFont(pg.Qt.QtGui.QFont("monospace", 9))
+            self.plot_widget.addItem(lbl)
+            self._id_labels.append(lbl)
+
+        # Update track centres
+        if tracks:
+            self._track_scatter.setData(
+                [t["x"] for t in tracks],
+                [t["y"] for t in tracks],
+            )
+        else:
+            self._track_scatter.setData([], [])
+
+        # Update per-track velocity arrows, covariance ellipses, ID labels
+        # Hide surplus items from previous frame
+        for i in range(len(tracks), len(self._vel_items)):
+            self._vel_items[i].setData([], [])
+        for i in range(len(tracks), len(self._ellipse_items)):
+            self._ellipse_items[i].setData([], [])
+        for i in range(len(tracks), len(self._id_labels)):
+            self._id_labels[i].setText("")
+
+        VEL_SCALE = 1.0  # seconds of look-ahead for velocity arrow
+        ELLIPSE_N = 64   # points on the 2-sigma ellipse
+        t_vals = np.linspace(0, 2 * math.pi, ELLIPSE_N)
+        cos_t, sin_t = np.cos(t_vals), np.sin(t_vals)
+
+        for i, t in enumerate(tracks):
+            tx, ty = t["x"], t["y"]
+            sigma = t["sigma"]   # positional 1-sigma (m)
+
+            # Velocity arrow: line from track centre to predicted position
+            ex = tx + t["vx"] * VEL_SCALE
+            ey = ty + t["vy"] * VEL_SCALE
+            self._vel_items[i].setData([tx, ex], [ty, ey])
+
+            # 2-sigma covariance circle (isotropic when we only have sigma)
+            r = 2.0 * sigma
+            self._ellipse_items[i].setData(
+                tx + r * cos_t,
+                ty + r * sin_t,
+            )
+
+            # ID label above the track
+            self._id_labels[i].setPos(tx, ty + r + 0.05)
+            self._id_labels[i].setText(f"T{t['id']}")
 
 
 # ---------------------------------------------------------------------------
