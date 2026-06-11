@@ -10,26 +10,62 @@ Each track i models one person as a Gaussian:
 State vector  m = [x, y, vx, vy]   (position + velocity in odom frame)
 Covariance    P is 4 × 4.
 
-Students implement:
-  - KalmanTracker.__init__()   : define F and Q
-  - KalmanTracker.predict()    : constant-velocity propagation
-  - KalmanTracker.associate()  : measurement-to-track matching
-  - KalmanTracker.update()     : KF update + track lifecycle management
+KalmanTracker maintains a constant-velocity Kalman filter per tracked person,
+with global-nearest-neighbour data association (Mahalanobis distance +
+Hungarian algorithm) so multiple people can be tracked simultaneously.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import numpy as np
+from scipy import linalg
+from scipy.optimize import linear_sum_assignment
 
 from .leg_detection import LegMeasurement
+
+
+# ---------------------------------------------------------------------------
+# Tunable constants
+# ---------------------------------------------------------------------------
+
+# Continuous white-noise-acceleration spectral density (m^2/s^3) used to build
+# Q in KalmanTracker.__init__. Larger -> tracks adapt to velocity changes
+# faster but are noisier; smaller -> smoother but laggier. Lowered from the
+# notebook's q=1 (tuned for synthetic walkers whose velocity actually changes
+# at that rate) to 0.5: real static clutter (furniture legs, wall corners)
+# has ~zero acceleration, and a smaller q keeps a coasting track's covariance
+# from ballooning during misses -- which otherwise lets it "jump" onto an
+# unrelated detection several metres away on real scans. Going much lower
+# (e.g. 0.1) makes the filter lag too much behind a person walking at a
+# normal ~1.4 m/s, breaking the two-people regression scenario.
+PROCESS_NOISE_Q = 0.5
+
+# Initial velocity std-dev (m/s) for newly spawned tracks. Velocity is
+# unobserved at spawn time, so this seeds P0's velocity block with a large
+# uncertainty until a second matched measurement lets the filter estimate it.
+# Lowered from 1.0 to 0.3 (a brisk walking pace): a large initial velocity
+# uncertainty mixes into position uncertainty on the very next predict(),
+# immediately widening a brand-new track's association gate -- exactly when
+# most spurious clutter-blip tracks live their entire (short) life.
+SPAWN_VELOCITY_SIGMA = 0.3
+
+# Mahalanobis distance-squared gate used in associate(). Chi-square critical
+# value for 2 DOF; 13.8 = 99.9% confidence. Pairs whose cost exceeds this are
+# rejected even if they were the globally optimal assignment. Tighter gates
+# (5.991 = 95%, 9.21 = 99%) reject a non-trivial fraction of *correct*
+# associations purely by chance -- especially in the first few steps after
+# spawn when the velocity estimate is still poor -- which causes a track to
+# be dropped, pruned, and respawned under a new ID. The very permissive 99.9%
+# gate trades a slightly higher chance of mis-associating two tracks that
+# pass close together for much more stable track IDs over time.
+ASSOCIATION_GATE_CHI2 = 13.8
+
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class Track:
@@ -54,17 +90,15 @@ class Track:
 
     so that  z = H @ m + noise,  noise ~ N(0, R).
     """
-
-    m: np.ndarray  # shape (4,): [x, y, vx, vy]
-    P: np.ndarray  # shape (4, 4)
+    m:        np.ndarray   # shape (4,): [x, y, vx, vy]
+    P:        np.ndarray   # shape (4, 4)
     track_id: int
-    misses: int = 0
+    misses:   int = 0
 
 
 # ---------------------------------------------------------------------------
 # Kalman tracker
 # ---------------------------------------------------------------------------
-
 
 class KalmanTracker:
     """
@@ -88,7 +122,8 @@ class KalmanTracker:
 
     # Observation matrix H: extracts (x, y) from the 4-D state.
     H: np.ndarray = np.array(
-        [[1, 0, 0, 0], [0, 1, 0, 0]],
+        [[1, 0, 0, 0],
+         [0, 1, 0, 0]],
         dtype=float,
     )
 
@@ -103,41 +138,25 @@ class KalmanTracker:
         self.tracks: List[Track] = []
         self._next_id: int = 0
 
-        # TODO(student): define the motion-model matrices here.
-        #
-        # Constant-velocity state transition (F):
-        #
-        #     F = [[1, 0, dt,  0],
-        #          [0, 1,  0, dt],
-        #          [0, 0,  1,  0],
-        #          [0, 0,  0,  1]]
-        #
-        # Process noise covariance (Q) — tune experimentally:
-        #
-        #     A diagonal initialisation is a good starting point:
-        #     Q = diag([σ_pos², σ_pos², σ_vel², σ_vel²])
-        #     where σ_pos ≈ 0.05 m,  σ_vel ≈ 0.1 m/s.
-        #
-        # Store them as:
-        #     self.F = ...   (shape 4×4)
-        #     self.Q = ...   (shape 4×4)
+        # Constant-velocity state transition.
+        self.F = np.array([
+            [1.0, 0.0, dt, 0.0],
+            [0.0, 1.0, 0.0, dt],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
 
-        self.F = np.array(
-            [
-                [1.0, 0.0, dt, 0.0],
-                [0.0, 1.0, 0.0, dt],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=float,
-        )
-
-        sigma_pos = 0.05
-        sigma_vel = 0.10
-        self.Q = np.diag([sigma_pos**2, sigma_pos**2, sigma_vel**2, sigma_vel**2])
+        # Continuous white-noise-acceleration process noise (see PROCESS_NOISE_Q).
+        q = PROCESS_NOISE_Q
+        self.Q = q * np.array([
+            [dt**3 / 3, 0,         dt**2 / 2, 0        ],
+            [0,         dt**3 / 3, 0,         dt**2 / 2],
+            [dt**2 / 2, 0,         dt,        0        ],
+            [0,         dt**2 / 2, 0,         dt       ],
+        ])
 
     # ------------------------------------------------------------------
-    # TODO Stage 2a — predict
+    # Predict
     # ------------------------------------------------------------------
 
     def predict(self) -> None:
@@ -151,15 +170,12 @@ class KalmanTracker:
 
         This is called automatically at the start of every update() cycle.
         """
-        # TODO(student): loop over self.tracks and apply the predict equations.
-        #   Use self.F and self.Q defined in __init__.
         for track in self.tracks:
             track.m = self.F @ track.m
             track.P = self.F @ track.P @ self.F.T + self.Q
-        pass
 
     # ------------------------------------------------------------------
-    # TODO Stage 2b — data association
+    # Data association
     # ------------------------------------------------------------------
 
     def associate(
@@ -168,6 +184,11 @@ class KalmanTracker:
     ) -> List[Tuple[int, int]]:
         """
         Match measurements to existing tracks (global nearest-neighbour).
+
+        Builds a Mahalanobis distance-squared cost matrix
+        (d²_ij = innovation.T @ inv(S_ij) @ innovation, with
+        S_ij = H @ P_i @ H.T + R_j), solves the linear assignment problem,
+        and gates out pairs whose cost exceeds ASSOCIATION_GATE_CHI2.
 
         Args:
             measurements: LegMeasurement list from the current scan.
@@ -179,30 +200,7 @@ class KalmanTracker:
 
             Unmatched measurements → passed to update() for track spawning.
             Unmatched tracks       → miss counter incremented in update().
-
-        Implementation steps
-        --------------------
-        1. Build a cost matrix  C  of shape (n_tracks, n_measurements).
-           A simple Euclidean distance between the track's predicted position
-           (track.m[:2]) and each measurement's (x, y) is a correct first step.
-           A more principled approach uses Mahalanobis distance:
-
-               d²_ij = innovation.T @ inv(S_ij) @ innovation
-               where innovation = [meas.x - m[0], meas.y - m[1]]
-                     S_ij       = H @ P @ H.T + R_j
-
-        2. Solve the linear assignment problem:
-
-               from scipy.optimize import linear_sum_assignment
-               row_ind, col_ind = linear_sum_assignment(C)
-
-        3. Gate: reject any assignment (i, j) where C[i, j] > gate_threshold
-           to prevent associating a track with a far-away measurement.
-           A typical gate for Euclidean cost: 1.0–2.0 m.
-
-        If there are no tracks or no measurements, return [].
         """
-        # TODO(student): build cost matrix and run linear_sum_assignment
         if not self.tracks or not measurements:
             return []
 
@@ -211,19 +209,20 @@ class KalmanTracker:
         C = np.zeros((n_tracks, n_meas))
 
         for i, track in enumerate(self.tracks):
+            P_pos = self.H @ track.P @ self.H.T
             for j, meas in enumerate(measurements):
-                C[i, j] = np.hypot(track.m[0] - meas.x, track.m[1] - meas.y)
-
-        from scipy.optimize import linear_sum_assignment
+                innovation = np.array([meas.x, meas.y]) - self.H @ track.m
+                R = np.array([[meas.Rxx, meas.Rxy], [meas.Rxy, meas.Ryy]])
+                S = P_pos + R
+                C[i, j] = innovation @ linalg.solve(S, innovation, assume_a="pos")
 
         row_ind, col_ind = linear_sum_assignment(C)
 
-        gate_threshold = 1.5
-        assignments = []
-        for r, c in zip(row_ind, col_ind):
-            if C[r, c] <= gate_threshold:
-                assignments.append((int(r), int(c)))
-        return assignments
+        return [
+            (int(r), int(c))
+            for r, c in zip(row_ind, col_ind)
+            if C[r, c] <= ASSOCIATION_GATE_CHI2
+        ]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -231,72 +230,38 @@ class KalmanTracker:
 
     def _spawn_track(self, meas: LegMeasurement) -> None:
         """Initialise a new Track from an unmatched measurement."""
-        m = np.array([meas.x, meas.y, 0.0, 0.0], dtype=float)
-
-        # TODO(student): set a sensible initial covariance P0.
-        #   A common diagonal initialisation:
-        #   P0 = diag([Rxx, Ryy, σ_vel², σ_vel²])
-        #   using the measurement's own Rxx, Ryy as position uncertainty seeds.
-        m = np.array([meas.x, meas.y, 0.0, 0.0], dtype=float)
-        sigma_vel = 1.0
-        P = np.diag([meas.Rxx, meas.Ryy, sigma_vel**2, sigma_vel**2])
+        m = np.array([meas.x, meas.y, 0.0, 0.0])
+        P = np.diag([meas.Rxx, meas.Ryy, SPAWN_VELOCITY_SIGMA**2, SPAWN_VELOCITY_SIGMA**2])
 
         self.tracks.append(Track(m=m, P=P, track_id=self._next_id))
         self._next_id += 1
 
     # ------------------------------------------------------------------
-    # TODO Stage 2c — full update cycle
+    # Full update cycle
     # ------------------------------------------------------------------
 
     def update(self, measurements: List[LegMeasurement]) -> None:
         """
         Run one complete tracking cycle: predict → associate → KF update.
 
-        Steps
-        -----
-        1. Call self.predict() to propagate all tracks.
-        2. Call self.associate(measurements) to get matched pairs.
-        3. For each matched (track_index, meas_index) pair, apply the KF
-           update equations:
-
-               z   =  np.array([meas.x, meas.y])
-               R   =  np.array([[meas.Rxx, meas.Rxy],
-                                 [meas.Rxy, meas.Ryy]])
-               y   =  z  -  H @ m              # innovation
-               S   =  H  @  P  @  H.T  +  R   # innovation covariance
-               K   =  P  @  H.T  @  np.linalg.inv(S)   # Kalman gain
-               m   =  m  +  K  @  y            # updated mean
-               P   =  (I  -  K  @  H)  @  P   # updated covariance
-                                               # (Joseph form is numerically safer)
-
-        4. For matched tracks: reset track.misses = 0.
-           For unmatched tracks: increment track.misses by 1.
-
-        5. Spawn a new Track (via self._spawn_track) for every measurement
-           that was NOT matched to any existing track.
-
-        6. Remove tracks from self.tracks where track.misses > self.max_misses.
-
-        The stub below performs steps 1–2 and identifies the matched/unmatched
-        sets so students can fill in steps 3–6 without having to re-derive those
-        sets themselves.
+        1. Propagate all tracks via predict().
+        2. Match measurements to tracks via associate().
+        3. For each matched pair, apply the KF correction:
+               innovation = z - H @ m
+               S = H @ P @ H.T + R
+               K = S^-1 @ (H @ P).T            # via linalg.solve
+               m = m + K @ innovation
+               P = P - K @ S @ K.T
+        4. Reset misses for matched tracks; increment for unmatched tracks.
+        5. Spawn a new track for every unmatched measurement.
+        6. Drop tracks with misses > max_misses.
         """
-
-        # TODO(student): step 3 — apply KF update for each (ti, mi) in assignments
-        # TODO(student): step 4 — update miss counters
-        # TODO(student): step 5 — spawn tracks for unmatched measurements
-        #   for mi, meas in enumerate(measurements):
-        #       if mi not in matched_meas_idxs:
-        #           self._spawn_track(meas)
-        # TODO(student): step 6 — prune stale tracks
-        #   self.tracks = [t for t in self.tracks if t.misses <= self.max_misses]
         self.predict()
         assignments = self.associate(measurements)
 
         matched_track_idxs = {ti for ti, _ in assignments}
         matched_meas_idxs = {mi for _, mi in assignments}
 
-        I = np.eye(4)
         for ti, mi in assignments:
             track = self.tracks[ti]
             meas = measurements[mi]
@@ -304,30 +269,23 @@ class KalmanTracker:
             z = np.array([meas.x, meas.y])
             R = np.array([[meas.Rxx, meas.Rxy], [meas.Rxy, meas.Ryy]])
 
-            y = z - self.H @ track.m
             S = self.H @ track.P @ self.H.T + R
-            K = track.P @ self.H.T @ np.linalg.inv(S)
+            K = linalg.solve(S, self.H @ track.P.T, assume_a="pos").T
 
-            # KF Mean correction
-            track.m = track.m + K @ y
-
-            # Joseph Form covariance update
-            ImKH = I - K @ self.H
-            track.P = ImKH @ track.P @ ImKH.T + K @ R @ K.T
+            innovation = z - self.H @ track.m
+            track.m = track.m + K @ innovation
+            track.P = track.P - K @ S @ K.T
 
             track.misses = 0
 
-        # Account for unmatched stale tracks
         for ti, track in enumerate(self.tracks):
             if ti not in matched_track_idxs:
                 track.misses += 1
 
-        # Spawn tracks for brand new entries
         for mi, meas in enumerate(measurements):
             if mi not in matched_meas_idxs:
                 self._spawn_track(meas)
 
-        # Clear expired tracks
         self.tracks = [t for t in self.tracks if t.misses <= self.max_misses]
 
     # ------------------------------------------------------------------
