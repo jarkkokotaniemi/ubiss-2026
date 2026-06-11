@@ -4,7 +4,7 @@ mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
 git clone https://github.com/jarkkokotaniemi/ubiss-2026.git
 cd ..
-colcon build --symlink-install
+colcon build
 source install/setup.bash
 ros2 launch people_avoidance people_avoidance.launch.py
 ```
