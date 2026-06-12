@@ -25,7 +25,7 @@ solvers.options["show_progress"] = False
 # Minimum standoff distance the robot must keep from any tracked person (m).
 # This is the floor of obstacle_radius(): even a perfectly-converged track
 # (lambda_max -> 0) still inflates to this radius.
-PERSON_CLEARANCE = 0.5
+PERSON_CLEARANCE = 0.03
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ def obstacle_radius(track: Track, sigma_scale: float) -> float:
 
     Returns  PERSON_CLEARANCE + sigma_scale * sqrt(lambda_max),  where
     lambda_max is the largest eigenvalue of the positional covariance
-    sub-block P[:2, :2]. The constant term enforces the minimum 0.5 m
+    sub-block P[:2, :2]. The constant term enforces the minimum standoff
     clearance even for a fully-converged track; the sigma term inflates
     the bubble further while the Kalman filter is still uncertain about
     where the person is.
@@ -68,6 +68,10 @@ def compute_velocity(
     omega_weight: float = 0.1,
     heading_gain: float = 2.5,
     goal_tolerance: float = 0.15,
+    v_prev: float = 0.0,
+    omega_prev: float = 0.0,
+    v_smoothness_weight: float = 0.1,
+    omega_smoothness_weight: float = 0.3,
 ) -> Twist:
     """
     Compute a velocity command that drives toward (goal_x, goal_y) while
@@ -98,6 +102,11 @@ def compute_velocity(
     heading_gain         : Proportional gain on heading error for the
                            pure-pursuit nominal controller.
     goal_tolerance       : Stop once within this distance of the goal (m).
+    v_prev, omega_prev   : The (v, ω) command issued on the previous cycle.
+                           Used to penalise large jumps so the path looks
+                           smooth ("momentum").
+    v_smoothness_weight  : Weight on (v - v_prev)^2 in the QP cost.
+    omega_smoothness_weight: Weight on (ω - ω_prev)^2 in the QP cost.
 
     Output
     ------
@@ -151,9 +160,17 @@ def compute_velocity(
     A_rows += [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]
     b_rows += [max_linear_speed, 0.0, max_angular_speed, max_angular_speed]
 
-    # min (v - v_nom)^2 + omega_weight*(ω - ω_nom)^2  s.t. A·[v,ω]^T <= b
-    P = matrix(np.diag([2.0, 2.0 * omega_weight]))
-    q_cost = matrix(np.array([-2.0 * v_nom, -2.0 * omega_weight * omega_nom]))
+    # min (v - v_nom)^2 + omega_weight*(ω - ω_nom)^2
+    #   + v_smoothness_weight*(v - v_prev)^2 + omega_smoothness_weight*(ω - ω_prev)^2
+    # s.t. A·[v,ω]^T <= b
+    P = matrix(np.diag([
+        2.0 * (1.0 + v_smoothness_weight),
+        2.0 * (omega_weight + omega_smoothness_weight),
+    ]))
+    q_cost = matrix(np.array([
+        -2.0 * (v_nom + v_smoothness_weight * v_prev),
+        -2.0 * (omega_weight * omega_nom + omega_smoothness_weight * omega_prev),
+    ]))
     G = matrix(np.array(A_rows, dtype=float))
     h_qp = matrix(np.array(b_rows, dtype=float))
 

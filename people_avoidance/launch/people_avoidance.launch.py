@@ -34,6 +34,8 @@ def generate_launch_description():
                 'omega_weight':          0.1,    # QP cost weight on omega (steer-before-brake)
                 'heading_gain':          2.5,    # pure-pursuit heading P-gain
                 'goal_tolerance':        0.15,   # m; stop within this distance of the goal
+                'v_smoothness_weight':   0.1,    # QP cost weight on (v - v_prev)^2 -- momentum
+                'omega_smoothness_weight': 0.3,  # QP cost weight on (omega - omega_prev)^2 -- momentum
             }],
         ),
         Node(

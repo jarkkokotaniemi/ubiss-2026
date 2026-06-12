@@ -71,6 +71,8 @@ class PeopleAvoidanceNode(Node):
         self.declare_parameter("omega_weight", 0.1)
         self.declare_parameter("heading_gain", 2.5)
         self.declare_parameter("goal_tolerance", 0.15)
+        self.declare_parameter("v_smoothness_weight", 0.1)
+        self.declare_parameter("omega_smoothness_weight", 0.3)
 
         p = self._params()
 
@@ -92,6 +94,10 @@ class PeopleAvoidanceNode(Node):
         # ── Latest destination — updated from /goal_pose, consumed on each /scan ─
         self._goal_x: float | None = None
         self._goal_y: float | None = None
+
+        # ── Last issued command — fed back for the momentum/smoothness terms ─
+        self._last_v: float = 0.0
+        self._last_omega: float = 0.0
 
         # ── Subscriptions ─────────────────────────────────────────────────────
         self.create_subscription(LaserScan, p["scan_topic"], self._scan_cb, 10)
@@ -256,7 +262,14 @@ class PeopleAvoidanceNode(Node):
             omega_weight=p["omega_weight"],
             heading_gain=p["heading_gain"],
             goal_tolerance=p["goal_tolerance"],
+            v_prev=self._last_v,
+            omega_prev=self._last_omega,
+            v_smoothness_weight=p["v_smoothness_weight"],
+            omega_smoothness_weight=p["omega_smoothness_weight"],
         )
+
+        self._last_v = cmd.linear.x
+        self._last_omega = cmd.angular.z
 
         self._cmd_pub.publish(cmd)
 
@@ -292,6 +305,8 @@ class PeopleAvoidanceNode(Node):
             "omega_weight": self.get_parameter("omega_weight").value,
             "heading_gain": self.get_parameter("heading_gain").value,
             "goal_tolerance": self.get_parameter("goal_tolerance").value,
+            "v_smoothness_weight": self.get_parameter("v_smoothness_weight").value,
+            "omega_smoothness_weight": self.get_parameter("omega_smoothness_weight").value,
         }
 
 
