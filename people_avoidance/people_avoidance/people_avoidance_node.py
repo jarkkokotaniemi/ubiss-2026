@@ -249,7 +249,7 @@ class PeopleAvoidanceNode(Node):
 
         # ── Stage 2: Kalman tracking (all tracks are in odom frame) ───────────
         self.tracker.update(measurements_odom)
-        tracks = self.tracker.get_tracks(robot_x=self._robot_x, robot_y=self._robot_y)
+        tracks = self.tracker.get_tracks()
         
         msg = TrackArray()
         for track in tracks:
