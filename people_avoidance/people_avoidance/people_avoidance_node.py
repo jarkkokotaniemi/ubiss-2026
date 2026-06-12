@@ -11,7 +11,7 @@ Data flow (triggered by each incoming /scan message):
                                            │
                                      List[Track] (odom frame)
                                            │
-                                  compute_velocity()  ◄──  robot pose (/odom)
+                              controller.compute()  ◄──  robot pose (/odom)
                                            │
                                         /cmd_vel
 """
@@ -33,7 +33,7 @@ import tf2_geometry_msgs  # Allows transforming PointStamped directly
 
 from .leg_detection import detect_legs, LegMeasurement
 from .tracking import KalmanTracker
-from .controller import compute_velocity
+from .controllers import make_controller, obstacle_radius
 
 from rclpy.qos import qos_profile_sensor_data
 
@@ -62,17 +62,29 @@ class PeopleAvoidanceNode(Node):
         self.declare_parameter("max_flatness", 0.02)            # NEW
 
         # Controller parameters
+        self.declare_parameter("controller_type", "cbf")  # "cbf" or "mpc"
         self.declare_parameter("max_linear_speed", 0.2)
         self.declare_parameter("max_angular_speed", 1.0)
         self.declare_parameter("obstacle_radius_scale", 1.0)
         self.declare_parameter("goal_pose_topic", "/goal_pose")
+        self.declare_parameter("goal_tolerance", 0.15)
+
+        # CBF controller parameters
         self.declare_parameter("lookahead_distance", 0.05)
         self.declare_parameter("cbf_gamma", 2.0)
         self.declare_parameter("omega_weight", 0.1)
         self.declare_parameter("heading_gain", 2.5)
-        self.declare_parameter("goal_tolerance", 0.15)
         self.declare_parameter("v_smoothness_weight", 0.1)
         self.declare_parameter("omega_smoothness_weight", 0.3)
+
+        # MPC controller parameters
+        self.declare_parameter("mpc_horizon", 15)
+        self.declare_parameter("mpc_cbf_gamma", 0.3)
+        self.declare_parameter("mpc_max_tracked_people", 5)
+        self.declare_parameter("mpc_q_pos", 10.0)
+        self.declare_parameter("mpc_q_theta", 0.1)
+        self.declare_parameter("mpc_r_v", 0.1)
+        self.declare_parameter("mpc_r_omega", 0.1)
 
         p = self._params()
 
@@ -85,6 +97,9 @@ class PeopleAvoidanceNode(Node):
             dt=p["dt"],
             max_misses=p["max_misses"],
         )
+
+        # ── Avoidance controller (built once: MPC pays its IPOPT JIT cost here) ─
+        self.controller = make_controller(kind=p["controller_type"], **p)
 
         # ── Latest robot pose — updated from /odom, consumed on each /scan ───
         self._robot_x: float = 0.0
@@ -243,35 +258,22 @@ class PeopleAvoidanceNode(Node):
             trk.vx = track.m[2]
             trk.vy = track.m[3]
 
-            pos_cov = track.P[:2, :2]
-            eigenvals = np.linalg.eigvalsh(pos_cov)  # sorted ascending
-            lambda_max = eigenvals[-1]
-            trk.radius = 0.0 + p["obstacle_radius_scale"] * math.sqrt(max(lambda_max, 0.0)) # first number is PERSON_CLEARANCE in controller.py
+            trk.radius = obstacle_radius(track, p["obstacle_radius_scale"])
 
             trk.id = track.track_id
             msg.tracks.append(trk)
         self._track_pub.publish(msg)
 
         # ── Stage 3: avoidance control (controller expects odom‑frame tracks) ─
-        cmd = compute_velocity(
+        cmd = self.controller.compute(
             tracks,
             robot_x=self._robot_x,
             robot_y=self._robot_y,
             robot_theta=self._robot_theta,
             goal_x=self._goal_x,
             goal_y=self._goal_y,
-            max_linear_speed=p["max_linear_speed"],
-            max_angular_speed=p["max_angular_speed"],
-            obstacle_radius_scale=p["obstacle_radius_scale"],
-            lookahead_distance=p["lookahead_distance"],
-            cbf_gamma=p["cbf_gamma"],
-            omega_weight=p["omega_weight"],
-            heading_gain=p["heading_gain"],
-            goal_tolerance=p["goal_tolerance"],
             v_prev=self._last_v,
             omega_prev=self._last_omega,
-            v_smoothness_weight=p["v_smoothness_weight"],
-            omega_smoothness_weight=p["omega_smoothness_weight"],
         )
 
         self._last_v = cmd.linear.x
@@ -306,13 +308,21 @@ class PeopleAvoidanceNode(Node):
             "max_angular_speed": self.get_parameter("max_angular_speed").value,
             "obstacle_radius_scale": self.get_parameter("obstacle_radius_scale").value,
             "goal_pose_topic": self.get_parameter("goal_pose_topic").value,
+            "goal_tolerance": self.get_parameter("goal_tolerance").value,
+            "controller_type": self.get_parameter("controller_type").value,
             "lookahead_distance": self.get_parameter("lookahead_distance").value,
             "cbf_gamma": self.get_parameter("cbf_gamma").value,
             "omega_weight": self.get_parameter("omega_weight").value,
             "heading_gain": self.get_parameter("heading_gain").value,
-            "goal_tolerance": self.get_parameter("goal_tolerance").value,
             "v_smoothness_weight": self.get_parameter("v_smoothness_weight").value,
             "omega_smoothness_weight": self.get_parameter("omega_smoothness_weight").value,
+            "mpc_horizon": self.get_parameter("mpc_horizon").value,
+            "mpc_cbf_gamma": self.get_parameter("mpc_cbf_gamma").value,
+            "mpc_max_tracked_people": self.get_parameter("mpc_max_tracked_people").value,
+            "mpc_q_pos": self.get_parameter("mpc_q_pos").value,
+            "mpc_q_theta": self.get_parameter("mpc_q_theta").value,
+            "mpc_r_v": self.get_parameter("mpc_r_v").value,
+            "mpc_r_omega": self.get_parameter("mpc_r_omega").value,
         }
 
 

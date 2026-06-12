@@ -47,7 +47,7 @@ from people_avoidance.leg_detection import (
     segment_scan,
 )
 from people_avoidance.tracking import KalmanTracker, Track
-from people_avoidance.controller import compute_velocity, obstacle_radius
+from people_avoidance.controllers import CBFController, obstacle_radius
 
 # ── Tunable constants (match your launch parameters) ─────────────────────────
 DISTANCE_THRESHOLD = 0.20  # segmentation gap (m)
@@ -98,6 +98,11 @@ class PipelineVisualizer(Node):
         super().__init__("pipeline_visualizer")
 
         self.tracker = KalmanTracker(dt=DT, max_misses=MAX_MISSES)
+        self.controller = CBFController(
+            max_linear_speed=MAX_LINEAR_SPEED,
+            max_angular_speed=MAX_ANGULAR_SPEED,
+            obstacle_radius_scale=OBSTACLE_RADIUS_SCALE,
+        )
 
         # Latest pipeline state (written by ROS thread, read by plot thread)
         self._lock = threading.Lock()
@@ -142,14 +147,15 @@ class PipelineVisualizer(Node):
         tracks = self.tracker.get_tracks()
 
         # ── Stage 3 — control ─────────────────────────────────────────────────
-        cmd = compute_velocity(
+        cmd = self.controller.compute(
             tracks,
             robot_x=self._robot_x,
             robot_y=self._robot_y,
             robot_theta=self._robot_theta,
-            max_linear_speed=MAX_LINEAR_SPEED,
-            max_angular_speed=MAX_ANGULAR_SPEED,
-            obstacle_radius_scale=OBSTACLE_RADIUS_SCALE,
+            goal_x=None,
+            goal_y=None,
+            v_prev=0.0,
+            omega_prev=0.0,
         )
 
         state = dict(
