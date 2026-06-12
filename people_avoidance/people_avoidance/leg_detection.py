@@ -336,7 +336,7 @@ def detect_legs(
 
     for seg in segments:
         if len(seg) < 4 or len(seg) > 150:
-            #print("segment length rejected: ", len(seg))
+            # print("segment length rejected: ", len(seg))
             continue
 
         r_seg = seg[:, 0]  # ranges in polar segment
@@ -402,7 +402,7 @@ def detect_legs(
             cos_a = float(np.clip(np.dot(v_lo, v_hi) / (len_lo * len_hi), -1.0, 1.0))
             apex_angle = math.acos(cos_a)
             if apex_angle < np.deg2rad(eff_angle_deg) or apex_angle > np.deg2rad(175):
-                #print("Angle: ", np.rad2deg(apex_angle), " Rejected")
+                # print("Angle: ", np.rad2deg(apex_angle), " Rejected")
                 continue
 
             # ── (d) Flatness rejection in polar arc-length space ───────────────

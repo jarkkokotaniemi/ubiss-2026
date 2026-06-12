@@ -347,7 +347,9 @@ class WaypointManager:
         sigma_scale: float,
     ) -> None:
         """Called once robot has cleared the exit radius. Replan and resume."""
-        self.boundary_center = None  # clear before replan so it can't be re-triggered immediately
+        self.boundary_center = (
+            None  # clear before replan so it can't be re-triggered immediately
+        )
         self._boundary_cooldown = 20  # suppress re-entry for ~2 s at 10 Hz
         self._replan(robot_x, robot_y, tracks, sigma_scale, avoid_boundary=True)
 
@@ -498,8 +500,17 @@ def compute_velocity(
             # Cleared — replan and resume
             wm.clear_boundary(robot_x, robot_y, tracks, obstacle_radius_scale)
         else:
-            # Nominal: drive straight forward; steer heading away from center
-            away_heading = math.atan2(robot_y - bcy, robot_x - bcx)
+            # Calculate the direct outward vector
+            radial_heading = math.atan2(robot_y - bcy, robot_x - bcx)
+
+            # Offset by 90 degrees (pi/2) to the right.
+            # NOTE: If the robot gets stuck orbiting, change 2.0 to something smaller
+            # like 3.0 or 4.0 (e.g., math.pi / 4.0 for a 45-degree outward spiral).
+            right_turn_offset = math.pi / 2.0
+
+            # Nominal: drive right of the outward vector
+            away_heading = radial_heading - right_turn_offset
+
             heading_error = (away_heading - robot_theta + math.pi) % (
                 2 * math.pi
             ) - math.pi

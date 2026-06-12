@@ -127,7 +127,6 @@ class PeopleAvoidanceNode(Node):
 
     def _odom_cb(self, msg: Odometry) -> None:
         """Cache the latest robot pose from odometry."""
-        self._odom_received = True
         self._robot_x = msg.pose.pose.position.x
         self._robot_y = msg.pose.pose.position.y
         self._robot_theta = _yaw_from_quaternion(
@@ -179,11 +178,6 @@ class PeopleAvoidanceNode(Node):
 
     def _scan_cb(self, scan: LaserScan) -> None:
         """Main pipeline callback — fires on every incoming LaserScan."""
-        if not self._odom_received:
-            self.get_logger().warning(
-                "Waiting for odometry...", throttle_duration_sec=2.0
-            )
-            return
         p = self._params()
 
         # ── Stage 1: leg detection (in laser frame) ───────────────────────────
