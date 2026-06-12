@@ -22,7 +22,7 @@ import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PointStamped
+from geometry_msgs.msg import Twist, PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from people_avoidance_msgs.msg import LegMeasurementMsg, LegMeasurementArray, TrackMsg, TrackArray
@@ -65,6 +65,12 @@ class PeopleAvoidanceNode(Node):
         self.declare_parameter("max_linear_speed", 0.2)
         self.declare_parameter("max_angular_speed", 1.0)
         self.declare_parameter("obstacle_radius_scale", 2.0)
+        self.declare_parameter("goal_pose_topic", "/goal_pose")
+        self.declare_parameter("lookahead_distance", 0.3)
+        self.declare_parameter("cbf_gamma", 2.0)
+        self.declare_parameter("omega_weight", 0.1)
+        self.declare_parameter("heading_gain", 2.5)
+        self.declare_parameter("goal_tolerance", 0.15)
 
         p = self._params()
 
@@ -83,9 +89,14 @@ class PeopleAvoidanceNode(Node):
         self._robot_y: float = 0.0
         self._robot_theta: float = 0.0
 
+        # ── Latest destination — updated from /goal_pose, consumed on each /scan ─
+        self._goal_x: float | None = None
+        self._goal_y: float | None = None
+
         # ── Subscriptions ─────────────────────────────────────────────────────
         self.create_subscription(LaserScan, p["scan_topic"], self._scan_cb, 10)
         self.create_subscription(Odometry, p["odom_topic"], self._odom_cb, qos_profile_sensor_data)
+        self.create_subscription(PoseStamped, p["goal_pose_topic"], self._goal_cb, 10)
 
         # ── Publisher ─────────────────────────────────────────────────────────
         self._cmd_pub = self.create_publisher(Twist, p["cmd_vel_topic"], 10)
@@ -109,6 +120,11 @@ class PeopleAvoidanceNode(Node):
             msg.pose.pose.orientation.z,
             msg.pose.pose.orientation.w,
         )
+
+    def _goal_cb(self, msg: PoseStamped) -> None:
+        """Cache the latest destination point (odom frame)."""
+        self._goal_x = msg.pose.position.x
+        self._goal_y = msg.pose.position.y
 
     def _transform_measurement_to_odom(self, m: LegMeasurement) -> LegMeasurement:
         """
@@ -230,9 +246,16 @@ class PeopleAvoidanceNode(Node):
             robot_x=self._robot_x,
             robot_y=self._robot_y,
             robot_theta=self._robot_theta,
+            goal_x=self._goal_x,
+            goal_y=self._goal_y,
             max_linear_speed=p["max_linear_speed"],
             max_angular_speed=p["max_angular_speed"],
             obstacle_radius_scale=p["obstacle_radius_scale"],
+            lookahead_distance=p["lookahead_distance"],
+            cbf_gamma=p["cbf_gamma"],
+            omega_weight=p["omega_weight"],
+            heading_gain=p["heading_gain"],
+            goal_tolerance=p["goal_tolerance"],
         )
 
         self._cmd_pub.publish(cmd)
@@ -263,6 +286,12 @@ class PeopleAvoidanceNode(Node):
             "max_linear_speed": self.get_parameter("max_linear_speed").value,
             "max_angular_speed": self.get_parameter("max_angular_speed").value,
             "obstacle_radius_scale": self.get_parameter("obstacle_radius_scale").value,
+            "goal_pose_topic": self.get_parameter("goal_pose_topic").value,
+            "lookahead_distance": self.get_parameter("lookahead_distance").value,
+            "cbf_gamma": self.get_parameter("cbf_gamma").value,
+            "omega_weight": self.get_parameter("omega_weight").value,
+            "heading_gain": self.get_parameter("heading_gain").value,
+            "goal_tolerance": self.get_parameter("goal_tolerance").value,
         }
 
 
