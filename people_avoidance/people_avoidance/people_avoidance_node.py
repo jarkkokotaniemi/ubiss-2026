@@ -64,9 +64,9 @@ class PeopleAvoidanceNode(Node):
         # Controller parameters
         self.declare_parameter("max_linear_speed", 0.2)
         self.declare_parameter("max_angular_speed", 1.0)
-        self.declare_parameter("obstacle_radius_scale", 2.0)
+        self.declare_parameter("obstacle_radius_scale", 1.0)
         self.declare_parameter("goal_pose_topic", "/goal_pose")
-        self.declare_parameter("lookahead_distance", 0.3)
+        self.declare_parameter("lookahead_distance", 0.1)
         self.declare_parameter("cbf_gamma", 2.0)
         self.declare_parameter("omega_weight", 0.1)
         self.declare_parameter("heading_gain", 2.5)
@@ -240,7 +240,7 @@ class PeopleAvoidanceNode(Node):
             pos_cov = track.P[:2, :2]
             eigenvals = np.linalg.eigvalsh(pos_cov)  # sorted ascending
             lambda_max = eigenvals[-1]
-            trk.radius = 0.5 + 2.0 * math.sqrt(max(lambda_max, 0.0)) # first 2 numbers are PERSON_CLEARANCE and obstacle_radius_scale in controller.py
+            trk.radius = 0.0 + 1.0 * math.sqrt(max(lambda_max, 0.0)) # first 2 numbers are PERSON_CLEARANCE and obstacle_radius_scale in controller.py
 
             trk.id = track.track_id
             msg.tracks.append(trk)

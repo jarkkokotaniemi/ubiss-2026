@@ -25,7 +25,7 @@ solvers.options["show_progress"] = False
 # Minimum standoff distance the robot must keep from any tracked person (m).
 # This is the floor of obstacle_radius(): even a perfectly-converged track
 # (lambda_max -> 0) still inflates to this radius.
-PERSON_CLEARANCE = 0.5
+PERSON_CLEARANCE = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ def compute_velocity(
     # ---- nominal pure-pursuit control: turn toward the goal, drive at v_des ----
     heading_to_goal = math.atan2(dy, dx)
     heading_error = (heading_to_goal - robot_theta + math.pi) % (2 * math.pi) - math.pi
-    v_nom = min(max_linear_speed, dist_to_goal)
+    v_nom = dist_to_goal
     omega_nom = heading_gain * heading_error
 
     # ---- CBF-QP safety filter: one constraint row per tracked person ----
