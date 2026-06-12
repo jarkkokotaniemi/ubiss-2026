@@ -43,11 +43,12 @@ def generate_launch_description():
                 # ── MPC controller (controller_type: 'mpc') ─────────────────────
                 'mpc_horizon':           15,     # N; predicted steps (horizon time = N * dt)
                 'mpc_cbf_gamma':         0.3,    # discrete CBF decay rate gamma in (0,1]
-                'mpc_max_tracked_people': 5,     # K; padded obstacle slots in the NLP
+                'mpc_max_tracked_people': 2,     # K; padded obstacle slots in the NLP
                 'mpc_q_pos':             10.0,   # stage/terminal cost weight on (x,y) tracking error
                 'mpc_q_theta':           0.1,    # stage/terminal cost weight on heading tracking error
                 'mpc_r_v':               0.1,    # stage cost weight on v^2 (control effort)
                 'mpc_r_omega':           0.1,    # stage cost weight on omega^2 (control effort)
+                'mpc_smoothness_weight': 0.5,    # weight on ||U0 - (v_prev,omega_prev)||^2 -- continuity, reduces left/right flip-flop
             }],
         ),
         Node(

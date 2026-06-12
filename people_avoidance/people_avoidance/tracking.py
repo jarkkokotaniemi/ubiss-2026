@@ -17,7 +17,7 @@ Hungarian algorithm) so multiple people can be tracked simultaneously.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import linalg
@@ -61,6 +61,13 @@ SPAWN_VELOCITY_SIGMA = 0.3
 # gate trades a slightly higher chance of mis-associating two tracks that
 # pass close together for much more stable track IDs over time.
 ASSOCIATION_GATE_CHI2 = 13.8
+
+# Maximum number of tracks returned by get_tracks(), nearest the robot first.
+# None -> return all active tracks (no limit). This only trims the read-only
+# snapshot handed to the controller; internal tracking (predict/associate/
+# update/spawn/prune) always runs on the full track list regardless of this
+# setting.
+MAX_TRACKS: Optional[int] = 2
 
 
 # ---------------------------------------------------------------------------
@@ -127,14 +134,23 @@ class KalmanTracker:
         dtype=float,
     )
 
-    def __init__(self, dt: float = 0.1, max_misses: int = 5) -> None:
+    def __init__(
+        self,
+        dt: float = 0.1,
+        max_misses: int = 5,
+        max_tracks: Optional[int] = MAX_TRACKS,
+    ) -> None:
         """
         Args:
             dt:         Time step between scans (seconds).
             max_misses: Delete a track after this many consecutive missed frames.
+            max_tracks: If set, get_tracks() returns only the nearest
+                        max_tracks tracks to the queried robot position.
+                        None -> get_tracks() returns all active tracks.
         """
         self.dt = dt
         self.max_misses = max_misses
+        self.max_tracks = max_tracks
         self.tracks: List[Track] = []
         self._next_id: int = 0
 
@@ -292,6 +308,17 @@ class KalmanTracker:
     # Read-only access
     # ------------------------------------------------------------------
 
-    def get_tracks(self) -> List[Track]:
-        """Return a snapshot of the current active track list."""
-        return list(self.tracks)
+    def get_tracks(self, robot_x: float = 0.0, robot_y: float = 0.0) -> List[Track]:
+        """
+        Return a snapshot of the current active track list.
+
+        If max_tracks is None, returns every active track. Otherwise returns
+        only the max_tracks tracks nearest to (robot_x, robot_y), sorted by
+        ascending distance. Internal tracking state is unaffected either way.
+        """
+        tracks = list(self.tracks)
+        if self.max_tracks is None:
+            return tracks
+
+        tracks.sort(key=lambda t: (t.m[0] - robot_x) ** 2 + (t.m[1] - robot_y) ** 2)
+        return tracks[: self.max_tracks]

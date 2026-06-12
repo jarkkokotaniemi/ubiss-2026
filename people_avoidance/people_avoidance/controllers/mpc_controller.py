@@ -56,6 +56,12 @@ class MPCController(BaseController):
     mpc_q_theta           : Stage/terminal cost weight on heading tracking error.
     mpc_r_v               : Stage cost weight on v^2 (control effort).
     mpc_r_omega           : Stage cost weight on omega^2 (control effort).
+    mpc_smoothness_weight : Weight on ||U[:,0] - (v_prev, omega_prev)||^2 -- a
+                            continuity penalty on the first control step.
+                            Adds hysteresis so the optimizer doesn't flip-flop
+                            between symmetric left/right detours around an
+                            obstacle (non-convex bistability) from one solve
+                            to the next.
     """
 
     # Obstacle slots further than this from the robot are treated as "dummy"
@@ -76,6 +82,7 @@ class MPCController(BaseController):
         mpc_q_theta: float = 0.1,
         mpc_r_v: float = 0.1,
         mpc_r_omega: float = 0.1,
+        mpc_smoothness_weight: float = 0.5,
     ) -> None:
         self.dt = dt
         self.N = mpc_horizon
@@ -85,6 +92,7 @@ class MPCController(BaseController):
         self.gamma = mpc_cbf_gamma
         self.K = mpc_max_tracked_people
         self.goal_tolerance = goal_tolerance
+        self.smoothness_weight = mpc_smoothness_weight
 
         Q = np.diag([mpc_q_pos, mpc_q_pos, mpc_q_theta])
         R = np.diag([mpc_r_v, mpc_r_omega])
@@ -108,6 +116,7 @@ class MPCController(BaseController):
         obs_p0 = opti.parameter(2, K)  # current (x, y) of each obstacle slot
         obs_v = opti.parameter(2, K)  # constant velocity (vx, vy) of each slot
         obs_r = opti.parameter(K)  # inflated radius of each slot
+        u_prev_p = opti.parameter(2)  # previously-applied (v, omega)
 
         # ---- stage cost + forward-Euler Dubins dynamics ----
         cost = 0
@@ -122,6 +131,14 @@ class MPCController(BaseController):
             opti.subject_to(X[:, k + 1] == x_next)
         dxN = X[:, N] - xref_p
         cost += dxN.T @ Qf @ dxN
+
+        # Continuity penalty on the first control step only: discourages
+        # U[:,0] from flipping away from the previously-applied (v, omega).
+        # Adds hysteresis so the optimizer stays in the same left/right
+        # detour basin from one solve to the next instead of oscillating.
+        du0 = U[:, 0] - u_prev_p
+        cost += self.smoothness_weight * (du0.T @ du0)
+
         opti.minimize(cost)
 
         # ---- initial state + box constraints ----
@@ -155,6 +172,7 @@ class MPCController(BaseController):
         self.obs_p0 = obs_p0
         self.obs_v = obs_v
         self.obs_r = obs_r
+        self.u_prev_p = u_prev_p
 
     def _warmup_solve(self) -> None:
         """
@@ -170,6 +188,7 @@ class MPCController(BaseController):
         self.opti.set_value(self.obs_p0, np.full((2, K), self._DUMMY_DISTANCE))
         self.opti.set_value(self.obs_v, np.zeros((2, K)))
         self.opti.set_value(self.obs_r, np.zeros(K))
+        self.opti.set_value(self.u_prev_p, [0.0, 0.0])
         try:
             sol = self.opti.solve()
             self.opti.set_initial(self.X, sol.value(self.X))
@@ -210,6 +229,7 @@ class MPCController(BaseController):
 
         self.opti.set_value(self.x0_p, [robot_x, robot_y, robot_theta])
         self.opti.set_value(self.xref_p, [goal_x, goal_y, theta_ref])
+        self.opti.set_value(self.u_prev_p, [v_prev, omega_prev])
 
         # ---- fill the K closest tracks into obstacle slots, pad the rest ----
         K = self.K

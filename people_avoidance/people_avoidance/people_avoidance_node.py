@@ -85,6 +85,7 @@ class PeopleAvoidanceNode(Node):
         self.declare_parameter("mpc_q_theta", 0.1)
         self.declare_parameter("mpc_r_v", 0.1)
         self.declare_parameter("mpc_r_omega", 0.1)
+        self.declare_parameter("mpc_smoothness_weight", 0.5)
 
         p = self._params()
 
@@ -248,7 +249,7 @@ class PeopleAvoidanceNode(Node):
 
         # ── Stage 2: Kalman tracking (all tracks are in odom frame) ───────────
         self.tracker.update(measurements_odom)
-        tracks = self.tracker.get_tracks()
+        tracks = self.tracker.get_tracks(robot_x=self._robot_x, robot_y=self._robot_y)
         
         msg = TrackArray()
         for track in tracks:
@@ -323,6 +324,7 @@ class PeopleAvoidanceNode(Node):
             "mpc_q_theta": self.get_parameter("mpc_q_theta").value,
             "mpc_r_v": self.get_parameter("mpc_r_v").value,
             "mpc_r_omega": self.get_parameter("mpc_r_omega").value,
+            "mpc_smoothness_weight": self.get_parameter("mpc_smoothness_weight").value,
         }
 
 
