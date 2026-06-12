@@ -236,6 +236,12 @@ class PeopleAvoidanceNode(Node):
             trk.y = track.m[1]
             trk.vx = track.m[2]
             trk.vy = track.m[3]
+
+            pos_cov = track.P[:2, :2]
+            eigenvals = np.linalg.eigvalsh(pos_cov)  # sorted ascending
+            lambda_max = eigenvals[-1]
+            trk.radius = 0.5 + 2.0 * math.sqrt(max(lambda_max, 0.0)) # first 2 numbers are PERSON_CLEARANCE and obstacle_radius_scale in controller.py
+
             trk.id = track.track_id
             msg.tracks.append(trk)
         self._track_pub.publish(msg)

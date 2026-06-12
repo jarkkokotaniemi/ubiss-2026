@@ -3,8 +3,8 @@ visualizer_direct.py — Lidar visualizer with direct click-to-goal publishing.
 
 Features:
   - Left-click on the plot to publish a PoseStamped goal to ROS2.
-  - Full visualization of Kalman tracks (velocity, covariance, IDs).
-  - No path planning or ZMQ dependencies.
+  - Visualization of Kalman tracks using dynamic radii from the ROS message.
+  - Full track visualizations: velocity arrows, circles, and IDs.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class LidarVisualizer(Node):
         self.leg_sub   = self.create_subscription(LegMeasurementArray, "/legs", self.leg_callback, 10)
         self.track_sub = self.create_subscription(TrackArray, "/tracks", self.track_callback, 10)
 
-        # Publisher for the goal (Direct to ROS2)
+        # Publisher for the goal
         self.goal_pub = self.create_publisher(PoseStamped, "/goal_pose", 10)
 
         # Data storage
@@ -60,7 +60,7 @@ class LidarVisualizer(Node):
         self.robot_y:   float = 0.0
         self.robot_yaw: float = 0.0
 
-        # Goal coordinates for visualization
+        # Goal coordinates
         self.goal_x: float | None = None
         self.goal_y: float | None = None
 
@@ -74,14 +74,14 @@ class LidarVisualizer(Node):
         msg.header.frame_id = "odom"
         msg.pose.position.x = x
         msg.pose.position.y = y
-        msg.pose.orientation.w = 1.0  # Neutral orientation
+        msg.pose.orientation.w = 1.0
         
         self.goal_pub.publish(msg)
         self.get_logger().info(f"Goal Published: x={x:.2f}, y={y:.2f}")
 
     def scan_callback(self, scan: LaserScan) -> None:
         try:
-            # Update Robot pose via TF
+            # Robot pose via TF
             try:
                 robot_tf = self.tf_buffer.lookup_transform(
                     "odom", "base_link", scan.header.stamp, timeout=Duration(seconds=0.05)
@@ -95,7 +95,7 @@ class LidarVisualizer(Node):
             except TransformException:
                 pass
 
-            # Transform Laser points to odom frame
+            # Transform Laser points
             trans = self.tf_buffer.lookup_transform(
                 "odom", scan.header.frame_id, rclpy.time.Time(), timeout=Duration(seconds=0.1)
             )
@@ -121,10 +121,16 @@ class LidarVisualizer(Node):
         self.leg_y = np.array([l.y for l in msg.legs]) if msg.legs else np.array([])
 
     def track_callback(self, msg: TrackArray) -> None:
+        """Updated to use the radius field from the ROS message."""
         tracks = []
         for t in msg.tracks:
             tracks.append({
-                "x": t.x, "y": t.y, "vx": t.vx, "vy": t.vy, "id": t.id, "sigma": 0.25
+                "x": t.x, 
+                "y": t.y, 
+                "vx": t.vx, 
+                "vy": t.vy, 
+                "id": t.id, 
+                "radius": t.radius  # Using the new field from your message
             })
         with self._track_lock:
             self.tracks = tracks
@@ -142,7 +148,7 @@ class MainWindow(QMainWindow):
     def __init__(self, ros_node: LidarVisualizer) -> None:
         super().__init__()
         self.ros_node = ros_node
-        self.setWindowTitle("Robot Goal Publisher")
+        self.setWindowTitle("Robot Goal UI")
         self.resize(900, 860)
         self.setStyleSheet("background:#0a0a0f;")
 
@@ -161,7 +167,7 @@ class MainWindow(QMainWindow):
         self.plot_widget.setYRange(-8, 8)
         vbox.addWidget(self.plot_widget)
 
-        # Permanent Plot Items
+        # Plot Items
         self._scan_scatter = pg.ScatterPlotItem(size=2, brush=pg.mkBrush(60, 200, 80))
         self._leg_scatter = pg.ScatterPlotItem(size=14, symbol="o", brush=pg.mkBrush(255, 60, 60, 180))
         self._track_scatter = pg.ScatterPlotItem(size=12, symbol="o", brush=pg.mkBrush(255, 153, 0, 200))
@@ -172,7 +178,7 @@ class MainWindow(QMainWindow):
                      self._goal_scatter, self._robot_arrow):
             self.plot_widget.addItem(item)
 
-        # Dynamic Track Item Pools
+        # Pools for dynamic elements
         self._vel_items: list[pg.PlotCurveItem] = []
         self._ellipse_items: list[pg.PlotCurveItem] = []
         self._id_labels: list[pg.TextItem] = []
@@ -183,7 +189,7 @@ class MainWindow(QMainWindow):
             '<span style="color:#ff3c3c">●</span> Legs &nbsp;'
             '<span style="color:#ff9900">●</span> Track pos &nbsp;'
             '<span style="color:#ff9900">→</span> Velocity &nbsp;'
-            '<span style="color:#ff6600">○</span> 2σ ellipse &nbsp;'
+            '<span style="color:#ff6600">○</span> Radius &nbsp;'
             '<span style="color:#ffdc00">✕</span> Goal'
         )
         legend = QLabel(legend_html)
@@ -206,58 +212,49 @@ class MainWindow(QMainWindow):
     def _update_ui(self) -> None:
         node = self.ros_node
 
-        # Update Scans and Legs
         self._scan_scatter.setData(node.scan_x, node.scan_y)
         self._leg_scatter.setData(node.leg_x, node.leg_y)
         
-        # Update Goal
         if node.goal_x is not None:
             self._goal_scatter.setData([node.goal_x], [node.goal_y])
 
-        # Update Robot
         self._robot_arrow.setPos(node.robot_x, node.robot_y)
         self._robot_arrow.setStyle(angle=-math.degrees(node.robot_yaw))
 
-        # Update Tracks
         with node._track_lock:
             tracks = list(node.tracks)
 
-        # Sync item pools
+        # Ensure we have enough plot items
         while len(self._vel_items) < len(tracks):
             v_item = pg.PlotCurveItem(pen=pg.mkPen(255, 180, 0, 200, width=2))
             e_item = pg.PlotCurveItem(pen=pg.mkPen(255, 100, 0, 160, width=1.5))
             l_item = pg.TextItem("", color=(255, 220, 100), anchor=(0.5, 1.2))
             l_item.setFont(pg.Qt.QtGui.QFont("monospace", 9))
-            self.plot_widget.addItem(v_item)
-            self.plot_widget.addItem(e_item)
-            self.plot_widget.addItem(l_item)
-            self._vel_items.append(v_item)
-            self._ellipse_items.append(e_item)
-            self._id_labels.append(l_item)
+            self.plot_widget.addItem(v_item); self.plot_widget.addItem(e_item); self.plot_widget.addItem(l_item)
+            self._vel_items.append(v_item); self._ellipse_items.append(e_item); self._id_labels.append(l_item)
 
-        # Reset unused items
+        # Clean up old tracks
         for i in range(len(tracks), len(self._vel_items)):
-            self._vel_items[i].setData([], [])
-            self._ellipse_items[i].setData([], [])
-            self._id_labels[i].setText("")
+            self._vel_items[i].setData([], []); self._ellipse_items[i].setData([], []); self._id_labels[i].setText("")
 
-        # Update track centers
         self._track_scatter.setData([t["x"] for t in tracks], [t["y"] for t in tracks])
 
-        # Draw Velocity and Ellipses
-        t_vals = np.linspace(0, 2 * math.pi, 32)
+        # Draw circle points
+        t_vals = np.linspace(0, 2 * math.pi, 40)
         cos_t, sin_t = np.cos(t_vals), np.sin(t_vals)
 
         for i, t in enumerate(tracks):
             tx, ty = t["x"], t["y"]
-            r = 2.0 * t["sigma"] # 2-sigma radius
+            r = t["radius"] # <--- Now uses the specific radius for this track
 
-            # Velocity arrow
+            # Velocity vector
             self._vel_items[i].setData([tx, tx + t["vx"]], [ty, ty + t["vy"]])
-            # Covariance circle
+            
+            # Use radius to draw the circle
             self._ellipse_items[i].setData(tx + r * cos_t, ty + r * sin_t)
-            # ID Label
-            self._id_labels[i].setPos(tx, ty + r + 0.05)
+            
+            # Position Label slightly above the circle
+            self._id_labels[i].setPos(tx, ty + r + 0.1)
             self._id_labels[i].setText(f"ID:{t['id']}")
 
 def main(args=None) -> None:
