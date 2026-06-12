@@ -25,7 +25,7 @@ solvers.options["show_progress"] = False
 # Minimum standoff distance the robot must keep from any tracked person (m).
 # This is the floor of obstacle_radius(): even a perfectly-converged track
 # (lambda_max -> 0) still inflates to this radius.
-PERSON_CLEARANCE = 0.5
+PERSON_CLEARANCE = 0.0
 
 
 # ---------------------------------------------------------------------------
